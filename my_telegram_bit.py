@@ -1,126 +1,280 @@
-import random
-import time
-import datetime
-import pytz
-import telegram
-import sqlite3
+import logging
 from telegram.ext import Updater, CommandHandler, MessageHandler, Filters, CallbackContext
+import sqlite3
+import random
+import datetime
+import threading
 from telegram import Update
 
-# replace YOUR_API_TOKEN with your actual API token from BotFather
-API_TOKEN = 'YOUR_API_TOKEN'
 
-# set up the time zone
-timezone = pytz.timezone('Europe/Paris')
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+logger = logging.getLogger(__name__)
 
-# set up the pause flag and pause time
-is_paused = False
-pause_time = None
+# Define a thread-local storage to hold the database connection
+db_local = threading.local()
 
-# define the function to send a random message
-def send_random_message(context):
-    global is_paused, pause_time
-    if is_paused:
-        if datetime.datetime.now().replace(tzinfo=timezone) >= pause_time:
-            is_paused = False
-            pause_time = None
-        else:
-            return
-    message = random.choice(messages)
-    context.bot.send_message(chat_id='YOUR_CHAT_ID', text=message)
+def get_db_connection():
+    # Check if the current thread already has a database connection
+    if not hasattr(db_local, 'conn') or db_local.conn is None or not hasattr(db_local.conn, 'closed') or db_local.conn.closed:
+        # If not, create a new connection and store it in the thread-local storage
+        db_local.conn = sqlite3.connect('my_telegram_bot.db')
 
-# define the /start command handler
-def start(update, context):
-    context.bot.send_message(chat_id=update.effective_chat.id, text='Привет, я бот для регулярных напоминаний')
+    # Return the connection
+    return db_local.conn
 
-# define the /add command handler
-def add(update, context):
-    context.bot.send_message(chat_id=update.effective_chat.id, text="Please send me your message.")
-    context.chat_data['waiting_for_message'] = True
-
-def add_message(update: Update, context: CallbackContext):
-    """Add a message to the database."""
-    update.message.reply_text("Please enter your message to be added:")
-    context.user_data["adding_message"] = True
-
-def save_message(update: Update, context: CallbackContext):
-    """Save the message to the database."""
-    message_text = update.message.text
-    with sqlite3.connect('messages.db') as conn:
-        c = conn.cursor()
-        c.execute("INSERT INTO messages (message) VALUES (?)", (message_text,))
-        conn.commit()
-    context.user_data["adding_message"] = False
-    update.message.reply_text(f"Message '{message_text}' has been added to the array.")
-
-# define the /show command handler
-def show(update, context):
-    conn = sqlite3.connect('messages.db')
-    c = conn.cursor()
-    c.execute('SELECT message_text FROM messages')
-    messages = c.fetchall()
-    num_messages = len(messages)
-    message_list = "\n".join([f"{i+1}. {message[0]}" for i, message in enumerate(messages)])
-    message = f"There are {num_messages} messages in the list:\n{message_list}"
-    context.bot.send_message(chat_id=update.effective_chat.id, text=message)
-    conn.close()
-
-# define the /del command handler
-def delete(update, context):
-    conn = sqlite3.connect('messages.db')
-    c = conn.cursor()
-    c.execute('SELECT message_text FROM messages')
-    messages = c.fetchall()
-    num_messages = len(messages)
-    message_list = "\n".join([f"{i+1}. {message[0]}" for i, message in enumerate(messages)])
-    message = f"Which message do you want to delete? Here is the list:\n{message_list}"
-    context.bot.send_message(chat_id=update.effective_chat.id, text=message)
-    context.chat_data['waiting_for_message'] = True
-    conn.close()
 
 def handle_message(update, context):
-    message_text = update.message.text
-    if context.chat_data.get('waiting_for_message'):
-        context.chat_data['waiting_for_message'] = False
-        num_messages = len(context.chat_data['messages'])
-        if message_text.isdigit() and int(message_text) <= num_messages:
-            message_index = int(message_text) - 1
-            del context.chat_data['messages'][message_index]
-            conn = sqlite3.connect('messages.db')
-            c = conn.cursor()
-            c.execute('DELETE FROM messages WHERE message_id = ?', (message_index+1,))
-            conn.commit()
-            conn.close()
-            context.bot.send_message(chat_id=update.effective_chat.id, text=f"Message #{message_index+1} has been deleted.")
-        else:
-            context.bot.send_message(chat_id=update.effective_chat.id, text=f"Invalid input. Please enter a number between 1 and {num_messages}.")
-    elif message_text.lower() == 'stop':
-        context.bot.send_message(chat_id=update.effective_chat.id, text="Stopping the bot.")
-        updater.stop()
+    user_id = update.message.from_user.id
+
+    # Get the database connection from the thread-local storage
+    conn = get_db_connection()
+
+    # Use the connection to execute the database query
+    c = conn.cursor()
+    c.execute("SELECT pause_time FROM users WHERE user_id=?", (user_id,))
+    result = c.fetchone()
+
+    # Close the database cursor
+    c.close()
+
+    # Send the response message
+    if result is None:
+        context.bot.send_message(chat_id=update.effective_chat.id, text="You are not registered yet. Please use the /start command to register.")
+        return
     else:
-        context.bot.send_message(chat_id=update.effective_chat.id, text=random.choice(messages))
+        pause_time = result[0]
+        if pause_time is None:
+            context.bot.send_message(chat_id=update.effective_chat.id, text="Your bot is active.")
+        else:
+            context.bot.send_message(chat_id=update.effective_chat.id, text="Your bot is paused until {}.".format(pause_time))
 
-# set up the updater and dispatcher
-updater = Updater(API_TOKEN, use_context=True)
-dispatcher = updater.dispatcher
+    # Check if the user is paused
+    if pause_time is not None and datetime.datetime.now() < pause_time:
+        # The user is paused, so don't send any messages
+        return
 
-# set up the command handlers
-start_handler = CommandHandler('start', start)
-add_handler = CommandHandler('add', add)
-pause_handler = CommandHandler('pause', pause)
-show_handler = CommandHandler('show', show)
-del_handler = CommandHandler('del', delete)
+    # Use the connection to execute the database query
+    c = conn.cursor()
+    c.execute("SELECT messages FROM users WHERE user_id=?", (user_id,))
+    result = c.fetchone()
 
-dispatcher.add_handler(start_handler)
-dispatcher.add_handler(add_handler)
-dispatcher.add_handler(pause_handler)
-dispatcher.add_handler(show_handler)
-dispatcher.add_handler(del_handler)
+    # Close the database cursor
+    c.close()
 
-# set up the job queue
-job_queue = updater.job_queue
-job_queue.run_daily(send_random_message, time=datetime.time(hour=random.randint(9, 21), minute=random.randint(0, 59), tzinfo=timezone))
+    # If the result is None, send a message indicating that there are no messages
+    if result is None:
+        context.bot.send_message(chat_id=update.effective_chat.id, text="You have no messages.")
+        return
 
-# start the bot
-updater.start_polling()
-updater.idle()
+    # If there are messages, send them as a numbered list
+    messages = result[0].split(';')
+    if len(messages) == 0:
+        context.bot.send_message(chat_id=update.effective_chat.id, text="You have no messages.")
+        return
+
+    numbered_messages = '\n'.join(['{}. {}'.format(i+1, message) for i, message in enumerate(messages)])
+    context.bot.send_message(chat_id=update.effective_chat.id, text=numbered_messages)
+
+    # Commit any changes to the database and close the connection
+    conn.commit()
+    conn.close()
+
+
+
+def start_bot():
+    updater = Updater(token="", use_context=True)
+    dp = updater.dispatcher
+
+    # Add handlers
+    dp.add_handler(CommandHandler("start", start))
+    dp.add_handler(CommandHandler("help", help_command))
+    dp.add_handler(CommandHandler("add", add_message, pass_args=True))
+    dp.add_handler(CommandHandler("show", show_messages))
+    dp.add_handler(CommandHandler("del", delete_message))
+    dp.add_handler(CommandHandler("pause", pause_bot))
+    dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
+
+    # Start the bot
+    updater.start_polling()
+    updater.idle()
+
+
+def start(update, context):
+    # Get the user ID from the message
+    user_id = update.message.from_user.id
+
+    # Get the database connection
+    conn = get_db_connection()
+    c = conn.cursor()
+
+    # Check if the user is already registered
+    c.execute("SELECT * FROM users WHERE user_id=?", (user_id,))
+    result = c.fetchone()
+
+    if result is not None:
+        # User is already registered, update the registration time
+        c.execute("UPDATE users SET registration_time=? WHERE user_id=?", (datetime.datetime.now(), user_id))
+        conn.commit()
+
+        # Send welcome back message
+        context.bot.send_message(chat_id=update.effective_chat.id, text="Welcome back!")
+
+    else:
+        # User is not yet registered, insert a new row into the users table
+        c.execute("INSERT INTO users (user_id, registration_time) VALUES (?, ?)", (user_id, datetime.datetime.now()))
+        conn.commit()
+
+        # Send welcome message
+        context.bot.send_message(chat_id=update.effective_chat.id, text="Welcome to the reminder bot! Use the /add command to add a new message to your reminders.")
+
+    # Close the database cursor and connection
+    c.close()
+    conn.close()
+
+
+def help_command(update, context):
+    """Send a message when the /help command is issued."""
+    update.message.reply_text('Helpful message here.')
+
+def add_message(update: Update, context: CallbackContext):
+    context.bot.send_message(chat_id=update.effective_chat.id, text="Please enter your message:")
+    user_id = update.message.from_user.id
+
+    def save_message(update: Update, context: CallbackContext):
+        message = update.message.text
+        user_id = update.message.from_user.id
+
+        conn = get_db_connection()
+        c = conn.cursor()
+
+        c.execute("SELECT messages FROM users WHERE user_id=?", (user_id,))
+        result = c.fetchone()
+
+        if result is None:
+            messages = []
+        else:
+            messages = result[0].split(';')
+
+        messages.append(message)
+        c.execute("REPLACE INTO users (user_id, messages) VALUES (?, ?)", (user_id, ';'.join(messages)))
+        conn.commit()
+
+        context.bot.send_message(chat_id=update.effective_chat.id, text="Your message has been added.")
+
+        # Close the connection
+        conn.close()
+
+
+    # Add a message handler for the user's response
+    message_handler = MessageHandler(Filters.text & ~Filters.command, save_message)
+    context.dispatcher.add_handler(message_handler)
+
+
+def show_messages(update, context):
+    user_id = update.message.from_user.id
+
+    # Get the database connection from the thread-local storage
+    conn = get_db_connection()
+
+    # Use the connection to execute the database query
+    c = conn.cursor()
+    c.execute("SELECT messages FROM users WHERE user_id=?", (user_id,))
+
+    # Fetch the result and close the cursor
+    result = c.fetchone()
+    c.close()
+
+    # If the result is None, send a message indicating that there are no messages
+    if result is None:
+        context.bot.send_message(chat_id=update.effective_chat.id, text="You have no messages.")
+        return
+
+    # If there are messages, split them and send each one in a separate message
+    messages_str = result[0]
+    if messages_str:
+        messages = messages_str.split(';')
+        for message in messages:
+            context.bot.send_message(chat_id=update.effective_chat.id, text=message)
+    else:
+        context.bot.send_message(chat_id=update.effective_chat.id, text="You have no messages.")
+
+
+def delete_message(update, context, dp):
+    user_id = update.message.from_user.id
+
+    def send_message_list(messages):
+        message_list = "\n".join([f"{i}. {msg}" for i, msg in enumerate(messages, start=1)])
+        context.bot.send_message(chat_id=update.effective_chat.id, text=f"Please select the number of the message you want to delete:\n{message_list}")
+
+    def delete_selected_message(selected_index):
+        conn = get_db_connection()
+        c = conn.cursor()
+
+        c.execute("SELECT messages FROM users WHERE user_id=?", (user_id,))
+        result = c.fetchone()
+
+        if result is None:
+            messages = []
+        else:
+            messages = result[0].split(';')
+
+        if not messages:
+            context.bot.send_message(chat_id=update.effective_chat.id, text="You have no messages.")
+            return
+
+        if selected_index < 1 or selected_index > len(messages):
+            context.bot.send_message(chat_id=update.effective_chat.id, text="Invalid message number.")
+            return
+
+        del messages[selected_index - 1]
+        c.execute("REPLACE INTO users (user_id, messages) VALUES (?, ?)", (user_id, ';'.join(messages)))
+        conn.commit()
+
+        context.bot.send_message(chat_id=update.effective_chat.id, text="The message has been deleted.")
+
+        # Close the connection
+        conn.close()
+
+        conn = get_db_connection()
+        c = conn.cursor()
+
+        c.execute("SELECT messages FROM users WHERE user_id=?", (user_id,))
+    result = c.fetchone()
+    if result is None:
+        messages = []
+    else:
+        messages = result[0].split(';')
+
+    # Close the connection
+    conn.close()
+
+    if not messages:
+        context.bot.send_message(chat_id=update.effective_chat.id, text="You have no messages.")
+    elif len(messages) == 1:
+        delete_selected_message(1)
+    else:
+        send_message_list(messages)
+
+        # Add a message handler for the user's response
+        selected_index_handler = MessageHandler(Filters.regex(r'^\d+$'), delete_selected_message)
+        dp.add_handler(selected_index_handler)
+
+
+def pause_bot(update, context):
+    user_id = update.message.from_user.id
+
+    conn = get_db_connection()
+    c = conn.cursor()
+
+    c.execute("UPDATE users SET paused_until=? WHERE user_id=?", (datetime.now() + timedelta(days=2), user_id))
+    conn.commit()
+
+    # Close the connection
+    conn.close()
+
+    context.bot.send_message(chat_id=update.effective_chat.id, text="The bot has been paused for 2 days.")
+
+
+if __name__ == '__main__':
+    start_bot()
+
