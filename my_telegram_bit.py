@@ -22,42 +22,75 @@ def get_db_connection():
     # Return the connection
     return db_local.conn
 
+def add_message(update: Update, context: CallbackContext):
+    context.bot.send_message(chat_id=update.effective_chat.id, text="Please enter your message:")
+
+    def save_message(update: Update, context: CallbackContext):
+        message_text = update.message.text
+        user_id = update.message.from_user.id
+
+        # Get the messages for the user from the database
+        conn = get_db_connection()
+        c = conn.cursor()
+        c.execute("SELECT messages FROM users WHERE user_id=?", (user_id,))
+        result = c.fetchone()
+        if result is None:
+            messages = []
+        else:
+            messages = result[0].split(';')
+
+        # Add the new message to the list of messages
+        messages.append(message_text)
+
+        # Save the updated list of messages back to the database
+        c.execute("UPDATE users SET messages=? WHERE user_id=?", (';'.join(messages), user_id))
+        conn.commit()
+        c.close()
+
+        context.bot.send_message(chat_id=update.effective_chat.id, text="Your message has been saved.")
+
+
+
+    # Add a message handler for the user's response
+    message_handler = MessageHandler(Filters.text & ~Filters.command, save_message)
+    context.dispatcher.add_handler(message_handler)
+
 
 def handle_message(update, context):
     user_id = update.message.from_user.id
-
+"""
     # Get the database connection from the thread-local storage
     conn = get_db_connection()
 
     # Use the connection to execute the database query
     c = conn.cursor()
     c.execute("SELECT pause_time FROM users WHERE user_id=?", (user_id,))
-    result = c.fetchone()
+    result1 = c.fetchone()
+
+    # Close the database cursor
+    c.close()
 
     # Send the response message
-    if result is None:
+    if result1 is None:
         context.bot.send_message(chat_id=update.effective_chat.id, text="You are not registered yet. Please use the /start command to register.")
-        return
+    else:
+        pause_time = result1[0]
+        if pause_time is None:
+            context.bot.send_message(chat_id=update.effective_chat.id, text="Your bot is active.")
+        else:
+            context.bot.send_message(chat_id=update.effective_chat.id, text="Your bot is paused until {}.".format(pause_time))
 
-    pause_time = result[0]
+    # Check if the user is paused
+    if result1 is not None:
+        pause_time = result1[0]
+        if pause_time is not None and datetime.datetime.now() < pause_time:
+            # The user is paused, so don't send any messages
+            return
 
-    if pause_time is not None and datetime.datetime.now() < pause_time:
-        # The user is paused, so don't send any messages
-        return
-
-    # Use the connection to execute the database query
-    c.execute("SELECT messages FROM users WHERE user_id=?", (user_id,))
-    result = c.fetchone()
-
-    # If the result is None, send a message indicating that there are no messages
-    if result is None:
-        context.bot.send_message(chat_id=update.effective_chat.id, text="You have no messages.")
-        return
-
-
-    # Close the database cursor and connection
-    c.close()
+    # Commit any changes to the database and close the connection
+    conn.commit()
     conn.close()
+"""
 
 
 def start_bot():
@@ -67,10 +100,10 @@ def start_bot():
     # Add handlers
     dp.add_handler(CommandHandler("start", start))
     dp.add_handler(CommandHandler("help", help_command))
-    dp.add_handler(CommandHandler("add", add_message, pass_args=True))
+    dp.add_handler(CommandHandler("add", add_message))
     dp.add_handler(CommandHandler("show", show_messages))
     dp.add_handler(CommandHandler("del", delete_message))
-    dp.add_handler(CommandHandler("pause", pause_bot))
+#    dp.add_handler(CommandHandler("pause", pause_bot))
     dp.add_handler(MessageHandler(Filters.text & ~Filters.command, handle_message))
 
     # Start the bot
@@ -114,37 +147,6 @@ def start(update, context):
 def help_command(update, context):
     """Send a message when the /help command is issued."""
     update.message.reply_text('Helpful message here.')
-
-def add_message(update: Update, context: CallbackContext):
-    context.bot.send_message(chat_id=update.effective_chat.id, text="Please enter your message:")
-    user_id = update.message.from_user.id
-
-    def save_message(message: str, context: CallbackContext):
-        user_id = context.user_data["user_id"]
-
-        conn = get_db_connection()
-        c = conn.cursor()
-
-        c.execute("SELECT messages FROM users WHERE user_id=?", (user_id,))
-        result = c.fetchone()
-
-        if result is None:
-            messages = []
-        else:
-            messages = result[0].split(";")
-
-        messages.append(message)
-        c.execute("UPDATE users SET messages=? WHERE user_id=?", (";".join(messages), user_id))
-        conn.commit()
-
-        context.bot.send_message(chat_id=context.chat_data["chat_id"], text="Your message has been added.")
-
-        # Close the connection
-        conn.close()
-
-    # Add a message handler for the user's response
-    message_handler = MessageHandler(Filters.text & ~Filters.command, save_message)
-    context.dispatcher.add_handler(message_handler)
 
 
 def show_messages(update, context):
@@ -216,21 +218,21 @@ def delete_message(update, context, dp):
         c = conn.cursor()
 
         c.execute("SELECT messages FROM users WHERE user_id=?", (user_id,))
-    result = c.fetchone()
-    if result is None:
-        messages = []
-    else:
-        messages = result[0].split(';')
+        result = c.fetchone()
+        if result is None:
+            messages = []
+        else:
+            messages = result[0].split(';')
 
-    # Close the connection
-    conn.close()
+        # Close the connection
+        conn.close()
 
-    if not messages:
-        context.bot.send_message(chat_id=update.effective_chat.id, text="You have no messages.")
-    elif len(messages) == 1:
-        delete_selected_message(1)
-    else:
-        send_message_list(messages)
+        if not messages:
+            context.bot.send_message(chat_id=update.effective_chat.id, text="You have no messages.")
+        elif len(messages) == 1:
+            delete_selected_message(1)
+        else:
+           send_message_list(messages)
 
         # Add a message handler for the user's response
         selected_index_handler = MessageHandler(Filters.regex(r'^\d+$'), delete_selected_message)
@@ -254,4 +256,3 @@ def pause_bot(update, context):
 
 if __name__ == '__main__':
     start_bot()
-
